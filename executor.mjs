@@ -127,13 +127,16 @@ async function upload(repository, token, release, name, file) {
 }
 
 export async function outputFiles(root, requested) {
+  const canonicalRoot = await realpath(root);
   const files = [];
   const seen = new Set();
   let bytes = 0;
   const visit = async file => {
     const stat = await lstat(file);
     const actual = await realpath(file);
-    if (stat.isSymbolicLink() || !actual.startsWith(root + path.sep)) throw new Error('Unsafe output');
+    const relative = path.relative(canonicalRoot, actual);
+    if (stat.isSymbolicLink() || !relative || relative === '..' ||
+        relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Unsafe output');
     if (stat.isDirectory()) {
       for (const name of (await readdir(file)).sort()) await visit(path.join(file, name));
     } else if (stat.isFile()) {

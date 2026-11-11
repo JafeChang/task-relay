@@ -81,6 +81,23 @@ test('outputs reject symlinks and escape through symlinked ancestors', async () 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('output containment supports an aliased temporary directory without accepting escaped files', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'relay-test-'));
+  try {
+    await mkdir(path.join(directory, 'actual'));
+    await mkdir(path.join(directory, 'actual/source'));
+    await mkdir(path.join(directory, 'outside'));
+    await writeFile(path.join(directory, 'actual/source/file'), 'result');
+    await writeFile(path.join(directory, 'outside/file'), 'private');
+    await symlink('actual', path.join(directory, 'alias'));
+    const root = path.join(directory, 'alias/source');
+    assert.deepEqual(await outputFiles(root, ['file']), [path.join(root, 'file')]);
+    await symlink('../../outside', path.join(directory, 'actual/source/link'));
+    await assert.rejects(outputFiles(root, ['link/file']));
+    await assert.rejects(outputFiles(root, ['../..']));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('captures output and kills commands on timeout or overflow', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'relay-test-'));
   const log = createWriteStream(path.join(directory, 'log'));
