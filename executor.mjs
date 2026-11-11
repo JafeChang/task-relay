@@ -8,14 +8,16 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { createGzip } from 'node:zlib';
 import { open } from './envelope.mjs';
+import { validateInputs, downloadInput } from './inputs.mjs';
 
 export const RUNNERS = ['ubuntu-24.04', 'ubuntu-24.04-arm', 'windows-2025',
   'windows-11-arm', 'macos-26-intel', 'macos-26'];
 const repoPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
-const reserved = /^(?:GITHUB_|ACTIONS_|RUNNER_|INPUT_|GIT_|NODE_|EXECUTOR_|LD_|DYLD_|SOURCE_TOKEN$|RESULT_TOKEN$|EXECUTION_KEY$|TICKET$|BASH_ENV$|ENV$|SHELLOPTS$|PYTHONPATH$|PYTHONSTARTUP$)/i;
+const reserved = /^(?:GITHUB_|ACTIONS_|RUNNER_|INPUT_|GIT_|NODE_|EXECUTOR_|LD_|DYLD_|TASK_INPUTS_DIR$|SOURCE_TOKEN$|RESULT_TOKEN$|EXECUTION_KEY$|TICKET$|BASH_ENV$|ENV$|SHELLOPTS$|PYTHONPATH$|PYTHONSTARTUP$)/i;
 const maxLog = 64 * 1024 * 1024;
 
 export function validate(request, context, now = Date.now()) {
+  validateInputs(request?.inputs);
   if (request?.version !== 1 || request.public_repository !== context.repository ||
       request.runner !== context.runner || !RUNNERS.includes(request.runner) ||
       !/^[a-f0-9]{32}$/.test(request.id) || !/^[a-f0-9]{40}$/.test(request.sha) ||
@@ -169,6 +171,7 @@ export async function execute(request, context, credentials) {
   });
   const directory = await mkdtemp(path.join(context.scratch || tmpdir(), 'task-'));
   const source = path.join(directory, 'source');
+  const inputs = path.join(directory, 'inputs');
   const logPath = path.join(directory, 'execution.log');
   const log = createWriteStream(logPath, { mode: 0o600 });
   // Prevent stream errors from printing path-bearing exception details.
@@ -177,9 +180,11 @@ export async function execute(request, context, credentials) {
   const receipt = { version: 1, request_id: request.id, repository: request.repository,
     source_sha: request.sha, ref: request.ref, runner: request.runner,
     started_at: new Date().toISOString(), result: 'FAILURE', steps: [], assets: [],
-    public_run: context.run_url, production_ready: false };
+    public_run: context.run_url, inputs: [], result_release_id: release.id, production_ready: false };
   try {
     await mkdir(source);
+    await mkdir(inputs, { mode: 0o700 });
+    for (const item of request.inputs ?? []) receipt.inputs.push(await downloadInput(request.repository, credentials.source, item, inputs));
     const environment = childEnvironment(process.env);
     const git = async (args, auth = false) => {
       const env = { ...environment };
@@ -203,21 +208,37 @@ export async function execute(request, context, credentials) {
     receipt.checkout_sha = await git(['rev-parse', 'HEAD']);
     for (const step of request.steps) {
       const result = await run(step.argv, { cwd: source,
-        env: childEnvironment(process.env, step.env), timeout: step.timeout, log });
+        env: { ...childEnvironment(process.env, step.env), TASK_INPUTS_DIR: inputs }, timeout: step.timeout, log });
       delete result.stdout;
       receipt.steps.push(result);
       if (result.code !== 0 || result.timed_out || result.log_limit_exceeded || logError) throw new Error('Step failed');
-    }
-    const files = await outputFiles(source, request.outputs);
-    for (const [index, file] of files.entries()) {
-      receipt.assets.push({ path: path.relative(source, file),
-        ...await upload(request.repository, credentials.result, release.id, `output-${index + 1}.bin`, file) });
     }
     receipt.result = 'SUCCESS';
   } catch {
     receipt.result = 'FAILURE';
   } finally {
     try {
+      // Preserve available diagnostics even when a command fails. A missing
+      // requested output still prevents a successful result.
+      let outputIndex = 0;
+      let outputBytes = 0;
+      const uploaded = new Set();
+      for (const requested of request.outputs) {
+        try {
+          for (const file of await outputFiles(source, [requested])) {
+            if (uploaded.has(file)) continue;
+            const stat = await lstat(file);
+            if (outputIndex >= 100 || outputBytes + stat.size > 1024**3) throw new Error('Output limit exceeded');
+            outputBytes += stat.size;
+            receipt.assets.push({ path: path.relative(source, file),
+              ...await upload(request.repository, credentials.result, release.id, `output-${++outputIndex}.bin`, file) });
+            uploaded.add(file);
+          }
+        } catch {
+          receipt.result = 'FAILURE';
+          receipt.output_collection_failed = true;
+        }
+      }
       await new Promise((resolve, reject) => {
         if (log.destroyed) { logError ? reject(new Error('Log failed')) : resolve(); return; }
         log.once('error', reject);
@@ -232,7 +253,7 @@ export async function execute(request, context, credentials) {
       await writeFile(receiptPath, JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 });
       await upload(request.repository, credentials.result, release.id, 'receipt.json', receiptPath);
       await api(request.repository, credentials.result, `/releases/${release.id}`, {
-        method: 'PATCH', body: { body: `${receipt.result}; source ${request.sha}; request ${request.id}. See receipt.json.` },
+        method: 'PATCH', body: { tag_name: tag, body: `${receipt.result}; source ${request.sha}; request ${request.id}. See receipt.json.` },
       });
     } finally {
       await rm(directory, { recursive: true, force: true });

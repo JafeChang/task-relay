@@ -153,6 +153,9 @@ test('private-only result transport, checkout binding and failure receipts', asy
             assert.match(receipt.assets[0].sha256, /^[a-f0-9]{64}$/);
             await assert.rejects(execute(value, scopedContext, credentials));
           }
+          if (scenario === 'command-failure') assert.equal(uploads.get('output-1.bin').toString(), 'private-result');
+          const update = calls.find(c => c.options.method === 'PATCH');
+          assert.equal(JSON.parse(update.options.body).tag_name, `ci-request-${value.id}`);
         }
         // One claim POST, no automatic retry, no public result writes.
         if (scenario !== 'success') assert(calls.filter(c => c.url.endsWith('/git/refs')).length <= 1);

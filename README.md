@@ -2,7 +2,7 @@
 
 A small utility for running trusted, pinned tasks and returning results over authenticated channels. Uses Node.js built-in modules; no package installation is required.
 
-The task workflow accepts an AES-256-GCM authenticated envelope bound to its repository and execution environment. Requests expire and claim a unique reference before execution. Git checkout verifies the complete commit ID. Commands run with bounded time and captured output. Results and checksums are returned to a private destination; the workflow does not publish artifacts, caches, summaries, or test reports.
+The task workflow accepts an AES-256-GCM authenticated envelope bound to its repository and execution environment. Requests expire and claim a unique reference before execution. Git checkout verifies the complete commit ID. Optional private inputs have bounded sizes and pinned SHA-256 identities; API credentials are never forwarded to signed download URLs. Commands run with bounded time and captured output. Results and checksums are returned to a private destination; the workflow does not publish artifacts, caches, summaries, or test reports.
 
 Run the utility's tests with `node --test test/*.test.mjs`.
 
